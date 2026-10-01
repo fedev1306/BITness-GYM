@@ -1,100 +1,88 @@
-<?php 
+<?php
 include '../../config/conexion.php';
+header('Content-Type: application/json; charset=utf-8');
 
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $correo = $_POST['correo'];
-    $contrasena = $_POST['contrasena'];
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    http_response_code(405);
+    echo json_encode(['status' => 'error', 'message' => 'Método no permitido.']);
+    exit();
+}
 
-    // Validar campos vacíos
-    if (empty($correo) || empty($contrasena)) {
-        echo json_encode(['status' => 'error', 'message' => 'Todos los campos son obligatorios']);
-        exit();
-    }
+$correo = filter_input(INPUT_POST, 'correo', FILTER_VALIDATE_EMAIL);
+$contrasena = $_POST['contrasena'] ?? '';
 
-    // Buscar el usuario por correo en la tabla USUARIO
-    $query = $conn->prepare("SELECT * FROM USUARIO WHERE email = :correo");
-    $query->bindParam(':correo', $correo);
-    $query->execute();
-    $usuario = $query->fetch(PDO::FETCH_ASSOC);
+if (!$correo || $contrasena === '') {
+    http_response_code(400);
+    echo json_encode(['status' => 'error', 'message' => 'Credenciales inválidas.']);
+    exit();
+}
 
-    if ($usuario) {
-        // Verificar si la contraseña está hasheada con password_hash (por ejemplo, bcrypt)
-        if (password_verify($contrasena, $usuario['contraseña'])) {
-            // Obtener el rol del usuario
-            $rol = $usuario['rol'];
+$query = $conn->prepare('SELECT * FROM USUARIO WHERE email = :correo LIMIT 1');
+$query->execute([':correo' => $correo]);
+$usuario = $query->fetch();
 
-            // Verificar si el usuario tiene algún tipo de suscripción en la tabla Paga
-            $isSubscribed = false;
-            if ($rol == 'cliente') {
-                // Si es cliente, verificar suscripción
-                $checkSubscriptionQuery = $conn->prepare("SELECT * FROM Paga WHERE id_usuario_FK = :id_usuario");
-                $checkSubscriptionQuery->bindParam(':id_usuario', $usuario['id_usuario']);
-                $checkSubscriptionQuery->execute();
-                $subscription = $checkSubscriptionQuery->fetch(PDO::FETCH_ASSOC);
-                
-                if ($subscription) {
-                    $isSubscribed = true;
-                }
-            }
+$authenticated = false;
+$needsUpgrade = false;
 
-            // Llamar a la función de iniciar sesión, pasando la información de la suscripción
-            iniciarSesion($usuario, $isSubscribed);
-        } else {
-            // Verificar si la contraseña está hasheada con SHA2
-            $sha2_hash = hash('sha256', $contrasena);
-            if ($sha2_hash === $usuario['contraseña']) {
-                // Obtener el rol del usuario
-                $rol = $usuario['rol'];
+if ($usuario) {
+    $storedHash = (string) $usuario['contraseña'];
 
-                // Verificar si el usuario tiene algún tipo de suscripción en la tabla Paga
-                $isSubscribed = false;
-                if ($rol == 'cliente') {
-                    // Si es cliente, verificar suscripción
-                    $checkSubscriptionQuery = $conn->prepare("SELECT * FROM Paga WHERE id_usuario_FK = :id_usuario");
-                    $checkSubscriptionQuery->bindParam(':id_usuario', $usuario['id_usuario']);
-                    $checkSubscriptionQuery->execute();
-                    $subscription = $checkSubscriptionQuery->fetch(PDO::FETCH_ASSOC);
-                    
-                    if ($subscription) {
-                        $isSubscribed = true;
-                    }
-                }
-
-                // Llamar a la función de iniciar sesión, pasando la información de la suscripción
-                iniciarSesion($usuario, $isSubscribed);
-            } else {
-                echo json_encode(['status' => 'error', 'message' => 'Correo o contraseña incorrectos.']);
-            }
-        }
-    } else {
-        echo json_encode(['status' => 'error', 'message' => 'Correo o contraseña incorrectos.']);
+    if (password_verify($contrasena, $storedHash)) {
+        $authenticated = true;
+        $needsUpgrade = password_needs_rehash($storedHash, PASSWORD_DEFAULT);
+    } elseif (hash_equals($storedHash, hash('sha256', $contrasena))) {
+        // Compatibilidad temporal con usuarios históricos. Se migra el hash al iniciar sesión.
+        $authenticated = true;
+        $needsUpgrade = true;
     }
 }
 
-function iniciarSesion($usuario, $isSubscribed) {
-    $cookie_lifetime = 30 * 24 * 60 * 60; // 30 días en segundos
+if (!$authenticated) {
+    http_response_code(401);
+    echo json_encode(['status' => 'error', 'message' => 'Correo o contraseña incorrectos.']);
+    exit();
+}
+
+if ($needsUpgrade) {
+    $newHash = password_hash($contrasena, PASSWORD_DEFAULT);
+    $update = $conn->prepare('UPDATE USUARIO SET contraseña = :hash WHERE id_usuario = :id');
+    $update->execute([':hash' => $newHash, ':id' => $usuario['id_usuario']]);
+}
+
+$isSubscribed = false;
+if ($usuario['rol'] === 'cliente') {
+    $check = $conn->prepare('SELECT 1 FROM Paga WHERE id_usuario_FK = :id_usuario LIMIT 1');
+    $check->execute([':id_usuario' => $usuario['id_usuario']]);
+    $isSubscribed = (bool) $check->fetchColumn();
+}
+
+iniciarSesion($usuario, $isSubscribed);
+
+function iniciarSesion(array $usuario, bool $isSubscribed): void
+{
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
 
     session_set_cookie_params([
-        'lifetime' => $cookie_lifetime, // Mantener la sesión durante 30 días
+        'lifetime' => 0,
         'path' => '/',
-        'secure' => false, // No es necesario usar HTTPS en localhost
+        'secure' => $isHttps,
         'httponly' => true,
-        'samesite' => 'Strict',
-        'domain' => false // No es necesario especificar el dominio en este caso
+        'samesite' => 'Lax',
     ]);
 
     session_start();
-    // Guardar información del usuario en la sesión
+    session_regenerate_id(true);
+
     $_SESSION['id_usuario'] = $usuario['id_usuario'];
     $_SESSION['usuario'] = $usuario['nombre'];
     $_SESSION['email'] = $usuario['email'];
     $_SESSION['rol'] = $usuario['rol'];
 
-    // Enviar respuesta JSON con la información
     echo json_encode([
-        'status' => 'success', 
-        'rol' => $usuario['rol'], 
-        'subscribed' => $isSubscribed
+        'status' => 'success',
+        'rol' => $usuario['rol'],
+        'subscribed' => $isSubscribed,
     ]);
 }
 ?>

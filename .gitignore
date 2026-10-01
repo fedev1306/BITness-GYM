@@ -1,0 +1,13 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Installed dependencies
+Code/vendor/
+Code/node_modules/
+
+# Logs / local runtime
+*.log
+.DS_Store
+Thumbs.db
