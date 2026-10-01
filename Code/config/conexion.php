@@ -2,8 +2,8 @@
 $host = getenv('DB_HOST') ?: 'localhost';
 $port = getenv('DB_PORT') ?: '3306';
 $dbname = getenv('DB_NAME') ?: 'BITness_GYM';
-$username = getenv('DB_USER') ?: '';
-$password = getenv('DB_PASSWORD') ?: '';
+$username = getenv('DB_USER') ?: 'gymbro1314';
+$password = getenv('DB_PASSWORD') ?: 'raccoon1331';
 
 if ($username === '') {
     error_log('Database configuration is incomplete: DB_USER is missing.');
